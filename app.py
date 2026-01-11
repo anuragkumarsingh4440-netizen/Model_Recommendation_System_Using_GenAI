@@ -2,9 +2,14 @@
 # Streamlit is used for UI rendering and interactivity
 # Pandas and NumPy handle data processing and statistics
 # OS, JSON, IO support environment access and exports
+# This block imports all required core libraries
+# Streamlit is used for UI rendering and interactivity
+# Pandas and NumPy handle data processing and statistics
+# OS, JSON, IO support environment access and exports
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 import os
 import json
 import io
@@ -70,8 +75,9 @@ model = genai.GenerativeModel("gemini-2.5-flash-lite")
 # No UI elements are placed inside helpers
 def detect_problem_type(target_series):
     if target_series.dtype.kind in "ifu":
-        return "Classification" if target_series.nunique() <= 20 else "Regression"
+        return "Regression"
     return "Classification"
+
 
 
 def compute_confidence(profile):
@@ -164,26 +170,42 @@ def parse_response(text):
 # Output varies per dataset profile
 def suggest_eda_actions(profile, outlier_count, total_rows):
     actions = []
+
     outlier_ratio = outlier_count / total_rows if total_rows else 0
 
     if profile["missing_ratio"] > 0.2:
-        actions.append(("❗ High missing values", "Use KNN/MICE or drop feature"))
+        actions.append(("❗ High missing values",
+                        "Use KNN / MICE imputation or drop high-missing features"))
     elif profile["missing_ratio"] > 0.05:
-        actions.append(("⚠️ Moderate missing values", "Median imputation + missing flag"))
+        actions.append(("⚠️ Moderate missing values",
+                        "Use median imputation + missing indicator"))
     else:
-        actions.append(("✅ Low missing values", "Mean / median imputation"))
+        actions.append(("✅ Low missing values",
+                        "Simple mean / median imputation is sufficient"))
 
     if outlier_ratio > 0.05:
-        actions.append(("❗ Heavy outliers", "Log transform or robust models"))
+        actions.append(("❗ Heavy outliers detected",
+                        "Apply log transform or prefer tree-based / robust models"))
     elif outlier_ratio > 0.01:
-        actions.append(("⚠️ Some outliers", "IQR capping"))
+        actions.append(("⚠️ Some outliers detected",
+                        "Apply IQR capping (winsorization)"))
     else:
-        actions.append(("✅ Minimal outliers", "Safe to remove"))
+        actions.append(("✅ Minimal outliers",
+                        "Outlier removal is safe"))
 
     if abs(profile["avg_skewness"]) > 1:
-        actions.append(("⚠️ High skewness", "Log / Box-Cox transform"))
+        actions.append(("⚠️ High skewness",
+                        "Apply log / Box-Cox transformation"))
+    elif abs(profile["avg_skewness"]) > 0.5:
+        actions.append(("ℹ️ Mild skewness",
+                        "Consider sqrt or log transform"))
     else:
-        actions.append(("✅ Low skewness", "No transformation required"))
+        actions.append(("✅ Low skewness",
+                        "No transformation required"))
+
+    if profile["avg_kurtosis"] > 3:
+        actions.append(("⚠️ Heavy-tailed distribution",
+                        "Prefer RobustScaler over StandardScaler"))
 
     return actions
 
@@ -197,6 +219,22 @@ uploaded_file = st.file_uploader("📂 Upload CSV Dataset", type=["csv"])
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
     st.success("Dataset loaded successfully")
+    st.markdown("<h1 style='font-size:42px;'>📦 Dataset Summary</h1>", unsafe_allow_html=True)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Rows", df.shape[0])
+    c2.metric("Columns", df.shape[1])
+    missing_rows = df.isnull().any(axis=1).sum()
+    missing_pct = round(df.isnull().mean().mean() * 100, 2)
+
+    c3.metric("Rows with Missing", missing_rows)
+    c4.metric("Missing %", f"{missing_pct}%")
+
+    c4.metric("Memory (MB)", round(df.memory_usage(deep=True).sum() / 1024**2, 2))
+
+    c5, c6 = st.columns(2)
+    c5.metric("Numeric Columns", len(df.select_dtypes(include=np.number).columns))
+    c6.metric("Categorical Columns", len(df.select_dtypes(exclude=np.number).columns))
 
     target = st.selectbox("🎯 Select Target Column", df.columns)
 
@@ -204,6 +242,17 @@ if uploaded_file:
         profile = profile_data(df, target)
         confidence = compute_confidence(profile)
         problem_type = detect_problem_type(df[target])
+        st.markdown("<h1 style='font-size:42px;margin-top:20px;'>🧠 ML Problem Type</h1>", unsafe_allow_html=True)
+
+        st.markdown(
+            f"""
+            <p style="font-size:36px;font-weight:700;color:#22c55e;">
+                {problem_type}
+            </p>
+            """,
+            unsafe_allow_html=True
+        )
+
 
         tab1, tab2 = st.tabs(["🏆 Model Recommendation", "📊 Statistical Analysis"])
 
@@ -305,29 +354,52 @@ if uploaded_file:
         with tab2:
             st.subheader("📊 Statistical Analysis Toolkit")
 
-            num_cols = df.select_dtypes(include=np.number).columns.tolist()
-            col = st.selectbox("Select Numeric Column", num_cols)
+    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
 
-            series = df[col].dropna()
+    if len(numeric_cols) == 0:
+        st.warning("No numeric columns available for statistical analysis.")
+    else:
+        col = st.selectbox("Select Numeric Column", numeric_cols)
 
-            q1, q3 = series.quantile([0.25, 0.75])
-            iqr = q3 - q1
-            outliers = series[(series < q1 - 1.5 * iqr) | (series > q3 + 1.5 * iqr)]
+        series = df[col].dropna()
 
-            st.subheader("🔍 Outlier Detection (IQR)")
-            st.write(f"Outliers detected: {len(outliers)}")
+        q1, q3 = series.quantile([0.25, 0.75])
+        iqr = q3 - q1
+        outliers = series[(series < q1 - 1.5 * iqr) | (series > q3 + 1.5 * iqr)]
 
-            st.markdown("<h1>🛠️ Recommended EDA Actions</h1>", unsafe_allow_html=True)
-            for title, rec in suggest_eda_actions(profile, len(outliers), len(series)):
-                st.markdown(
-                    f"""
-                    <div style="font-size:26px;margin-bottom:18px;">
-                        <b>{title}</b><br>
-                        👉 {rec}
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+        st.subheader("🔍 Outlier Detection (IQR)")
+        st.write(f"Outliers detected: {len(outliers)}")
+
+        st.subheader("📈 Numeric Distribution (Quick View)")
+        plot_type = st.selectbox("Select Plot Type", ["Histogram", "Boxplot"])
+
+        fig, ax = plt.subplots(figsize=(4.5, 2.5))
+
+        if plot_type == "Histogram":
+            ax.hist(series, bins=30)
+            ax.set_title(f"Histogram: {col}", fontsize=10)
+
+        if plot_type == "Boxplot":
+            ax.boxplot(series, vert=False)
+            ax.set_title(f"Boxplot: {col}", fontsize=10)
+
+        ax.tick_params(labelsize=8)
+        st.pyplot(fig)
+
+        st.markdown("<h1>🛠️ Recommended EDA Actions</h1>", unsafe_allow_html=True)
+
+        actions = suggest_eda_actions(profile, len(outliers), len(series))
+        for title, rec in actions:
+            st.markdown(
+                f"""
+                <div style="font-size:26px;margin-bottom:18px;">
+                    <b>{title}</b><br>
+                    👉 {rec}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
 
 # This block renders the footer section
 # Appears at the bottom of the application
